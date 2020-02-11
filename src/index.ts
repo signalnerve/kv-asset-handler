@@ -138,24 +138,19 @@ const getAssetFromKV = async (event: FetchEvent, options?: Partial<Options>): Pr
   if (options.cacheControl.bypassCache || options.cacheControl.edgeTTL === null) {
     shouldEdgeCache = false
   }
-  // only set max-age if explictly passed in a number as an arg
-  const shouldSetBrowserCache = typeof options.cacheControl.browserTTL === 'number'
+
+  const shouldSetBrowserCache = true
 
   let response = null
   if (shouldEdgeCache) {
     response = await cache.match(cacheKey)
   }
 
+  const cacheControlDirectives = new Set()
+
   if (response) {
     let headers = new Headers(response.headers)
     headers.set('CF-Cache-Status', 'HIT')
-    if (shouldSetBrowserCache) {
-      headers.set('cache-control', `max-age=${options.cacheControl.browserTTL}`)
-    } else {
-      // don't assume we want same cache behavior of edge TTL on client
-      // so remove the header from the response we'll return
-      headers.delete('cache-control')
-    }
     response = new Response(response.body, { headers })
   } else {
     const body = await ASSET_NAMESPACE.get(pathKey, 'arrayBuffer')
@@ -164,21 +159,27 @@ const getAssetFromKV = async (event: FetchEvent, options?: Partial<Options>): Pr
     }
     response = new Response(body)
 
-    // TODO: could implement CF-Cache-Status REVALIDATE if path w/o hash existed in manifest
-
     if (shouldEdgeCache) {
       response.headers.set('CF-Cache-Status', 'MISS')
-      // determine Cloudflare cache behavior
-      response.headers.set('Cache-Control', `max-age=${options.cacheControl.edgeTTL}`)
+      cacheControlDirectives.add(`s-maxage=${options.cacheControl.edgeTTL}`)
       event.waitUntil(cache.put(cacheKey, response.clone()))
     }
   }
+
   response.headers.set('Content-Type', mimeType)
   if (shouldSetBrowserCache) {
-    response.headers.set('Cache-Control', `max-age=${options.cacheControl.browserTTL}`)
+    cacheControlDirectives.add(`max-age=${options.cacheControl.browserTTL}`)
+    cacheControlDirectives.add(`stale-while-revalidate=30`)
   } else {
-    response.headers.delete('Cache-Control')
+    // don't assume we want same cache behavior of edge TTL on client
+    // so remove the header from the response we'll return
+    cacheControlDirectives.clear()
   }
+
+  response.headers.set(
+    'cache-control',
+    cacheControlDirectives.size === 0 ? Array.from(cacheControlDirectives).join(', ') : null,
+  )
   return response
 }
 
